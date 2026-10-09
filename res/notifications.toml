@@ -1,0 +1,40 @@
+# HeroNotify: ~/.config/hero/notifications.toml
+# Read each time a notification comes in: changes apply right away.
+
+# Where pop-ups show: top-right, top-left, bottom-right, bottom-left, top,
+# bottom.
+position = "top-right"
+
+# Seconds a pop-up stays, unless the app asks for another time (0: until
+# closed). Urgent ones stay until closed.
+timeout = 6
+
+# Pop-ups on screen at once; more wait their turn.
+max-shown = 3
+
+# Pop-up width, in pixels.
+width = 360
+
+[do-not-disturb]
+# On by hand (HeroBar's notifications switch, or `heronotify dnd on`).
+# Notifications still go to the history, without popping up.
+on = false
+
+# Urgent notifications (alarms, low battery...) still pop up.
+urgent = true
+
+# Apps that still pop up, by the name they show or their desktop id:
+# allow = ["Alarm Clock", "org.gnome.Calendar"]
+allow = []
+
+# Times it's on by itself: from, to (past midnight is fine) and optionally
+# the days ("mon".."sun", the day it starts on).
+# schedule = [
+#   { from = "22:00", to = "07:00" },
+#   { from = "09:00", to = "12:00", days = ["sat", "sun"] },
+# ]
+schedule = []
+
+[history]
+# Notifications kept for HeroBar's list (the oldest go first).
+keep = 100

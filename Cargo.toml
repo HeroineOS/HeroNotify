@@ -1,0 +1,45 @@
+[package]
+name = "heronotify"
+version = "0.1.0"
+edition = "2021"
+description = "Notifications for HeroineOS: pop-ups, history and do-not-disturb, for every app"
+license = "MIT"
+repository = "https://github.com/HeroineOS/HeroNotify"
+
+[dependencies]
+heroui = { git = "https://github.com/HeroineOS/HeroUI", features = ["layer-shell"] }
+dbus = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
+toml_edit = { version = "0.23", default-features = false, features = ["parse", "display"] }
+png = "0.18"
+
+# The HeroineOS fltk-sys fork: Wayland layer-shell (pop-ups over windows).
+[patch.crates-io]
+fltk-sys = { git = "https://github.com/HeroineOS/fltk-sys" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[package.metadata.deb]
+maintainer = "HeroineOS <https://github.com/HeroineOS>"
+copyright = "HeroineOS contributors"
+section = "x11"
+priority = "optional"
+depends = "$auto"
+extended-description = """\
+The notifications of HeroineOS: pop-ups for every app that sends desktop \
+notifications (the freedesktop D-Bus interface: Firefox, chat apps, \
+notify-send...), a history HeroBar shows, and do-not-disturb with \
+exceptions and schedules. D-Bus starts it when an app sends one; the \
+pop-ups take a few megabytes while they're on screen, and it exits when \
+idle."""
+assets = [
+    ["target/release/heronotify", "usr/bin/", "755"],
+    ["res/org.freedesktop.Notifications.hero.service", "usr/share/dbus-1/services/", "644"],
+    ["README.md", "usr/share/doc/heronotify/README.md", "644"],
+]
