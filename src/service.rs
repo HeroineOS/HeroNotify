@@ -6,7 +6,7 @@
 //! has shown for a while.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::rc::Rc;
@@ -60,6 +60,9 @@ struct Service {
     popups: Option<Popups>,
     /// Ids handed to the pop-ups and not closed yet.
     shown: HashSet<u32>,
+    /// Their apps (name, desktop id) and whether they have a default
+    /// action, for bringing the app forward when one is clicked.
+    apps: HashMap<u32, (String, String, bool)>,
 }
 
 pub fn run() -> Result<(), String> {
@@ -90,8 +93,16 @@ pub fn run() -> Result<(), String> {
         let events: Vec<Event> = service.borrow().popups.as_ref().map(|p| p.events.try_iter().collect()).unwrap_or_default();
         for e in events {
             match e {
+                Event::Open(id) => {
+                    if let Some((app, entry, acted)) = service.borrow().apps.get(&id).cloned() {
+                        crate::focus::open(app, entry, acted);
+                    }
+                }
                 Event::Closed(id, reason) => {
-                    service.borrow_mut().shown.remove(&id);
+                    let mut s = service.borrow_mut();
+                    s.shown.remove(&id);
+                    s.apps.remove(&id);
+                    drop(s);
                     let _ = c.channel().send(closed(id, reason));
                 }
                 Event::Action(id, key) => {
@@ -104,6 +115,7 @@ pub fn run() -> Result<(), String> {
         if ended {
             let mut s = service.borrow_mut();
             s.popups = None;
+            s.apps.clear();
             for id in std::mem::take(&mut s.shown) {
                 let _ = c.channel().send(closed(id, UNDEFINED));
             }
@@ -234,7 +246,10 @@ fn notify(n: Incoming, service: &Rc<RefCell<Service>>) -> u32 {
         if s.popups.is_none() {
             s.popups = start_popups();
         }
+        let s = &mut *s;
         if let Some(p) = &mut s.popups {
+            let acted = note.actions.iter().any(|(k, _)| k == "default");
+            s.apps.insert(id, (note.app.clone(), note.entry.clone(), acted));
             tell(p, &Order::Show(note));
             s.shown.insert(id);
         }

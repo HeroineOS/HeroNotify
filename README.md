@@ -18,9 +18,15 @@ one of them works with HeroNotify unchanged.
 So between notifications, nothing of it is running. (Measured on sway; private memory.)
 
 Pop-ups stack in a corner of the screen over windows (a layer-shell surface on Wayland) and
-take no keyboard. Click one to open what it's about (the app's default action) or close it; its
-buttons are the app's actions; the × on the one pointed at, or any other mouse button, closes
-it. Pointing at one keeps it on screen. Urgent ones stay until closed.
+take no keyboard. Each one's time runs down along a bar at its bottom, and it goes when the bar
+does; pointing at it stops the bar until the pointer leaves. Apps that ask for a pop-up that
+never goes get the usual time anyway; only urgent ones (alarms, low battery) stay until closed.
+
+Click a pop-up to open what it's about: the app gets its "default" action (Telegram opens the
+chat) and its window is brought forward through the compositor (HeroWM's IPC, or sway's),
+since Wayland apps can't raise their own windows from a notification; an app that isn't
+running is started from its desktop entry. Its buttons are the app's actions. Only the × closes
+it.
 
 ## Do not disturb
 

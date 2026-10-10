@@ -3,6 +3,7 @@
 
 mod config;
 mod dirs;
+mod focus;
 mod popups;
 mod service;
 mod store;
