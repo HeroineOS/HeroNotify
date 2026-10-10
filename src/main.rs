@@ -108,6 +108,14 @@ fn send(app: &str, summary: &str, body: &str, urgent: bool) -> Result<(), String
     use dbus::arg::{PropMap, Variant};
     let c = dbus::blocking::Connection::new_session().map_err(|e| format!("no session bus ({e})"))?;
     let proxy = c.with_proxy(service::NAME, "/org/freedesktop/Notifications", std::time::Duration::from_secs(10));
+    // Which service shows it (another one may hold the name).
+    let (server, _, _, _): (String, String, String, String) = proxy.method_call(service::NAME, "GetServerInformation", ()).map_err(|e| {
+        if e.name() == Some("org.freedesktop.DBus.Error.ServiceUnknown") {
+            "no notification service: D-Bus can't start HeroNotify (is the heronotify package installed?)".to_string()
+        } else {
+            e.to_string()
+        }
+    })?;
     let mut hints: PropMap = PropMap::new();
     if urgent {
         hints.insert("urgency".into(), Variant(Box::new(2u8)));
@@ -116,5 +124,17 @@ fn send(app: &str, summary: &str, body: &str, urgent: bool) -> Result<(), String
     let (_id,): (u32,) = proxy
         .method_call(service::NAME, "Notify", (app, 0u32, "", summary, body, actions, hints, -1i32))
         .map_err(|e| e.to_string())?;
+    if server == "HeroNotify" {
+        let c = config::Config::load();
+        let (m, d) = config::local_now();
+        if c.quiet_at(m, d) && !c.lets_through(app, "", if urgent { 2 } else { 1 }) {
+            let how = if c.do_not_disturb.on { "on" } else { "on (scheduled)" };
+            println!("sent, but do not disturb is {how}: it only went to the list");
+        } else {
+            println!("sent");
+        }
+    } else {
+        println!("sent, but {server} shows notifications here, not HeroNotify (stop {server} to use HeroNotify)");
+    }
     Ok(())
 }
