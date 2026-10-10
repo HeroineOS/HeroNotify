@@ -24,7 +24,8 @@ it. Pointing at one keeps it on screen. Urgent ones stay until closed.
 
 ## Do not disturb
 
-On by hand (`heronotify dnd on`, or HeroBar's switch) or by schedules. While it's on,
+On by hand (`heronotify dnd on`, or HeroBar's switch) or by schedules, set in
+Appearance's Notifications page (or the file below). While it's on,
 notifications go to the history without popping up, except urgent ones (alarms, low battery)
 and apps you let through.
 
@@ -60,6 +61,7 @@ heronotify unread           how many are new
 heronotify seen             mark the history seen
 heronotify clear [ID]       empty the history, or take one out
 heronotify dnd [on|off|toggle]
+heronotify send [--app NAME] [--urgent] SUMMARY [BODY]   (like notify-send)
 ```
 
 The history is `~/.local/state/hero/notifications.jsonl` (one notification per line, newest

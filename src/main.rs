@@ -18,6 +18,8 @@ Usage:
   heronotify unread           how many in the history are new
   heronotify seen             mark the history seen
   heronotify clear [ID]       empty the history, or take one out
+  heronotify send [--app NAME] [--urgent] SUMMARY [BODY]
+                              send a notification (like notify-send)
   heronotify dnd [on|off|toggle]
                               do-not-disturb by hand (no word: whether it's on now)
   heronotify --print-default-config
@@ -54,6 +56,20 @@ fn main() {
                 }
             }
         }
+        Some("send") => {
+            let (mut app, mut urgent, mut words) = ("heronotify".to_string(), false, vec![]);
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--app" => app = it.next().cloned().unwrap_or_default(),
+                    "--urgent" => urgent = true,
+                    _ => words.push(a.clone()),
+                }
+            }
+            let Some(summary) = words.first() else { fail("send what? (see --help)") };
+            let body = words.get(1).cloned().unwrap_or_default();
+            send(&app, summary, &body, urgent).unwrap_or_else(|e| fail(e));
+        }
         Some("unread") => {
             let seen = store::state().seen;
             println!("{}", store::history().iter().filter(|n| n.id > seen).count());
@@ -84,4 +100,21 @@ fn main() {
         Some("-h" | "--help") => usage(),
         Some(other) => fail(format!("unknown argument {other:?} (see --help)")),
     }
+}
+
+/// Sends a notification through the session bus (to whichever service
+/// runs; D-Bus starts HeroNotify if none does).
+fn send(app: &str, summary: &str, body: &str, urgent: bool) -> Result<(), String> {
+    use dbus::arg::{PropMap, Variant};
+    let c = dbus::blocking::Connection::new_session().map_err(|e| format!("no session bus ({e})"))?;
+    let proxy = c.with_proxy(service::NAME, "/org/freedesktop/Notifications", std::time::Duration::from_secs(10));
+    let mut hints: PropMap = PropMap::new();
+    if urgent {
+        hints.insert("urgency".into(), Variant(Box::new(2u8)));
+    }
+    let actions: Vec<String> = vec![];
+    let (_id,): (u32,) = proxy
+        .method_call(service::NAME, "Notify", (app, 0u32, "", summary, body, actions, hints, -1i32))
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
