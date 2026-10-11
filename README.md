@@ -22,6 +22,11 @@ take no keyboard. Each one's time runs down along a bar at its bottom, and it go
 does; pointing at it stops the bar until the pointer leaves. Apps that ask for a pop-up that
 never goes get the usual time anyway; only urgent ones (alarms, low battery) stay until closed.
 
+Pop-ups use the theme's background and border colors, like HeroBar's popups. They slide in
+from the screen edge, slide back out when their time runs out or the × is clicked, and shrink
+away when clicked open; the others glide into place. With the theme's animations off (battery
+saver) all of that is instant.
+
 Click a pop-up to open what it's about: the app gets its "default" action (Telegram opens the
 chat) and its window is brought forward through the compositor (HeroWM's IPC, or sway's),
 since Wayland apps can't raise their own windows from a notification; an app that isn't

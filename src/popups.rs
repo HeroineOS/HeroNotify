@@ -7,6 +7,10 @@
 //! Each card's time runs out along a bar at its bottom; pointing at the
 //! card stops it there until the pointer leaves. A click opens what it's
 //! about; only its × closes it.
+//!
+//! Cards slide in from the screen edge, slide back out when they time out
+//! or are closed, shrink away when clicked open, and the others glide into
+//! place (all instant with the theme's animations off).
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -166,15 +170,73 @@ enum Msg {
     Tick,
     Hover(Option<u32>),
     Click(u32, Part),
+    /// The last card has finished leaving.
+    Gone,
 }
 
-/// One card as the widget draws it.
+/// How a card leaves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Exit {
+    /// Back out the way it came (timed out, ×, closed by its app).
+    Away,
+    /// Shrinking where it is (clicked open).
+    Taken,
+}
+
+/// How long coming in and going out take (seconds).
+const IN: f64 = 0.34;
+const OUT: f64 = 0.24;
+
+/// One card as the widget draws it, with where it is in its motion.
 #[derive(Clone)]
-struct Drawn {
+struct Item {
     note: Note,
     layout: Layout,
-    y: i32,
     clock: Option<Clock>,
+    /// Distance from the window's anchored edge (top, or bottom for the
+    /// bottom corners): where it's going, and where it is now.
+    target: f64,
+    at: f64,
+    /// Animation-clock time it came in (or left, and how).
+    born: f64,
+    leaving: Option<(f64, Exit)>,
+}
+
+/// The cards in motion, shared by the model and the widget.
+#[derive(Default)]
+struct Stack {
+    items: Vec<Item>,
+    /// Cards are laid from the bottom edge up.
+    bottom: bool,
+    /// Where cards come from and go to: (x, y) direction.
+    side: (f64, f64),
+    /// The window height last asked for.
+    height: i32,
+    /// No cards wanted any more: say when the last has left.
+    ending: bool,
+}
+
+impl Stack {
+    /// The height the window needs now: every card where it is or is
+    /// going, whichever reaches further.
+    fn needed(&self) -> i32 {
+        let far = self.items.iter().map(|i| i.at.max(i.target) + i.layout.h as f64).fold(0.0, f64::max);
+        (far.ceil() as i32 + SHADOW).max(1)
+    }
+
+    /// Whether anything is moving (else only the time bars change).
+    fn moving(&self, now: f64) -> bool {
+        self.items.iter().any(|i| i.leaving.is_some() || (i.at - i.target).abs() > 0.3 || now - i.born < IN)
+    }
+
+    /// A card's top in the window.
+    fn top(&self, i: &Item, win_h: i32) -> f64 {
+        if self.bottom {
+            win_h as f64 - i.at - i.layout.h as f64
+        } else {
+            i.at
+        }
+    }
 }
 
 struct Popups {
@@ -182,17 +244,14 @@ struct Popups {
     cards: Vec<Card>,
     waiting: VecDeque<Note>,
     hovered: Option<u32>,
-    view: Rc<RefCell<Vec<Drawn>>>,
+    stack: Rc<RefCell<Stack>>,
+    /// How cards that just closed leave.
+    exits: Vec<(u32, Exit)>,
 }
 
 impl Popups {
     fn width(&self) -> i32 {
         self.config.width.clamp(240, 800)
-    }
-
-    /// Newest nearest the corner's edge.
-    fn bottom_up(&self) -> bool {
-        matches!(self.config.position, Position::BottomLeft | Position::BottomRight | Position::Bottom)
     }
 
     /// How long a notification stays: urgent ones until closed; apps asking
@@ -224,9 +283,10 @@ impl Popups {
         self.sync_hover();
     }
 
-    fn close(&mut self, id: u32, reason: Option<u32>) {
+    fn close(&mut self, id: u32, reason: Option<u32>, exit: Exit) {
         if let Some(i) = self.cards.iter().position(|c| c.note.id == id) {
             self.cards.remove(i);
+            self.exits.push((id, exit));
             if let Some(r) = reason {
                 say(&Event::Closed(id, r));
             }
@@ -255,35 +315,70 @@ impl Popups {
         }
     }
 
-    /// Lays the cards out and sizes the window to them; quits when none.
+    /// Lays the cards out (they glide there) and sizes the window; quits
+    /// once none are left (after the last one's leaving).
     fn refresh(&mut self) -> Task<Msg> {
-        if self.cards.is_empty() && self.waiting.is_empty() {
+        let animated = heroui::anim::enabled();
+        let now = heroui::anim::clock();
+        let mut st = self.stack.borrow_mut();
+        // Leaving: the ones closed just now.
+        for (id, exit) in self.exits.drain(..) {
+            if let Some(i) = st.items.iter_mut().find(|i| i.note.id == id && i.leaving.is_none()) {
+                i.leaving = Some((now, exit));
+            }
+        }
+        if !animated {
+            st.items.retain(|i| i.leaving.is_none());
+        }
+        // Newest nearest the edge.
+        let mut edge = SHADOW as f64;
+        for c in &self.cards {
+            let target = edge;
+            edge += (c.layout.h + GAP) as f64;
+            match st.items.iter_mut().find(|i| i.note.id == c.note.id && i.leaving.is_none()) {
+                Some(i) => {
+                    i.note = c.note.clone();
+                    i.layout = c.layout.clone();
+                    i.clock = c.clock;
+                    i.target = target;
+                    if !animated {
+                        i.at = target;
+                    }
+                }
+                None => st.items.push(Item {
+                    note: c.note.clone(),
+                    layout: c.layout.clone(),
+                    clock: c.clock,
+                    target,
+                    at: target,
+                    born: if animated { now } else { f64::NEG_INFINITY },
+                    leaving: None,
+                }),
+            }
+        }
+        let empty = self.cards.is_empty() && self.waiting.is_empty();
+        if empty && st.items.is_empty() {
             return Task::quit();
         }
-        let mut order: Vec<&Card> = self.cards.iter().collect();
-        if self.bottom_up() {
-            order.reverse();
+        st.ending = empty;
+        let h = st.needed();
+        if h > st.height || !animated {
+            st.height = h;
+            heroui::resize_window(self.width() + 2 * SHADOW, h);
         }
-        let mut y = SHADOW;
-        let mut view = vec![];
-        for c in order {
-            view.push(Drawn { note: c.note.clone(), layout: c.layout.clone(), y, clock: c.clock });
-            y += c.layout.h + GAP;
-        }
-        *self.view.borrow_mut() = view;
-        heroui::resize_window(self.width() + 2 * SHADOW, y - GAP + SHADOW);
+        drop(st);
         if let Some(mut w) = app::first_window() {
-            heroui::widgets::repaint(&mut w);
+            w.redraw();
         }
         Task::none()
     }
 
     /// The clocks as drawn (after pausing or resuming one).
     fn sync_view(&mut self) {
-        let mut v = self.view.borrow_mut();
-        for d in v.iter_mut() {
-            if let Some(c) = self.cards.iter().find(|c| c.note.id == d.note.id) {
-                d.clock = c.clock;
+        let mut st = self.stack.borrow_mut();
+        for i in st.items.iter_mut() {
+            if let Some(c) = self.cards.iter().find(|c| c.note.id == i.note.id) {
+                i.clock = c.clock;
             }
         }
     }
@@ -295,7 +390,7 @@ impl App for Popups {
     fn update(&mut self, msg: Msg) -> Task<Msg> {
         match msg {
             Msg::Order(Order::Show(n)) => self.show(n),
-            Msg::Order(Order::Close(id)) => self.close(id, None),
+            Msg::Order(Order::Close(id)) => self.close(id, None, Exit::Away),
             Msg::Eof => return Task::quit(),
             Msg::Tick => {
                 let now = Instant::now();
@@ -304,13 +399,13 @@ impl App for Popups {
                     // Without animations the bars move with this tick.
                     if !heroui::anim::enabled() {
                         if let Some(mut w) = app::first_window() {
-                            heroui::widgets::repaint(&mut w);
+                            w.redraw();
                         }
                     }
                     return Task::none();
                 }
                 for id in gone {
-                    self.close(id, Some(EXPIRED));
+                    self.close(id, Some(EXPIRED), Exit::Away);
                 }
             }
             Msg::Hover(id) => {
@@ -324,7 +419,7 @@ impl App for Popups {
             Msg::Click(id, part) => {
                 let Some(card) = self.cards.iter().find(|c| c.note.id == id) else { return Task::none() };
                 let has_default = card.note.actions.iter().any(|(k, _)| k == "default");
-                match part {
+                match part.clone() {
                     Part::Close => {}
                     Part::Button(key) => {
                         say(&Event::Action(id, key));
@@ -337,14 +432,21 @@ impl App for Popups {
                         say(&Event::Open(id));
                     }
                 }
-                self.close(id, Some(DISMISSED));
+                let exit = if part == Part::Close { Exit::Away } else { Exit::Taken };
+                self.close(id, Some(DISMISSED), exit);
+            }
+            Msg::Gone => {
+                if self.cards.is_empty() && self.waiting.is_empty() {
+                    return Task::quit();
+                }
             }
         }
         self.refresh()
     }
 
     fn view(&self) -> Element<Self, Msg> {
-        let view = self.view.clone();
+        let stack = self.stack.clone();
+        let width = self.width();
         Element::new(move |ctx| {
             let mut f = Frame::default();
             f.set_frame(FrameType::NoBox);
@@ -352,48 +454,104 @@ impl App for Popups {
             let pointer: Rc<Cell<Option<(i32, i32)>>> = Rc::default();
             let hover: Rc<RefCell<(Option<u32>, Option<Part>)>> = Rc::default();
             {
-                let (view, hover) = (view.clone(), hover.clone());
+                let (stack, hover) = (stack.clone(), hover.clone());
                 f.draw(move |f| {
                     let h = hover.borrow().clone();
-                    let now = Instant::now();
-                    for d in view.borrow().iter() {
-                        let part = if h.0 == Some(d.note.id) { h.1.clone() } else { None };
-                        draw_card(d, f.x() + SHADOW, f.y() + d.y, f.w() - 2 * SHADOW, part, now);
+                    let (now, clock) = (Instant::now(), heroui::anim::clock());
+                    let st = stack.borrow();
+                    for i in st.items.iter() {
+                        let part = if h.0 == Some(i.note.id) && i.leaving.is_none() { h.1.clone() } else { None };
+                        let (x, y) = (f.x() + SHADOW, f.y() as f64 + st.top(i, f.h()));
+                        // Where it is in coming in or going out.
+                        let (alpha, scale, shift) = match i.leaving {
+                            Some((t0, exit)) => {
+                                let q = heroui::anim::ease_in(((clock - t0) / OUT).clamp(0.0, 1.0));
+                                match exit {
+                                    Exit::Away => (1.0 - q, 1.0 - 0.03 * q, 72.0 * q),
+                                    Exit::Taken => (1.0 - q, 1.0 - 0.1 * q, 0.0),
+                                }
+                            }
+                            None => {
+                                let p = heroui::anim::ease_out(((clock - i.born) / IN).clamp(0.0, 1.0));
+                                (p, 0.96 + 0.04 * p, 56.0 * (1.0 - p))
+                            }
+                        };
+                        let rect = (x - SHADOW, y.round() as i32 - SHADOW, width + 2 * SHADOW, i.layout.h + 2 * SHADOW);
+                        let offset = (st.side.0 * shift, st.side.1 * shift + (y - y.round()));
+                        heroui::fx::draw_transformed(rect, scale, offset, alpha, || draw_card(i, x, y.round() as i32, width, part, now));
                     }
                 });
             }
-            // The bars run down smoothly: a frame each time the screen
-            // draws one, while any is running.
+            // Each frame: cards glide to their places, the ones leaving go,
+            // and the window follows (grown at once, shrunk once settled).
             {
-                let (view, mut w) = (view.clone(), f.clone());
-                heroui::anim::each_frame(move |_| {
+                let (stack, mut w) = (stack.clone(), f.clone());
+                let emit = ctx.emitter();
+                heroui::anim::each_frame(move |dt| {
                     if w.was_deleted() {
                         return false;
                     }
-                    if view.borrow().iter().any(|d| d.clock.is_some_and(|k| k.since.is_some())) {
+                    let now = heroui::anim::clock();
+                    let mut st = stack.borrow_mut();
+                    let moving = st.moving(now);
+                    let k = 1.0 - (-dt * 14.0).exp();
+                    for i in st.items.iter_mut() {
+                        i.at += (i.target - i.at) * k;
+                        if (i.target - i.at).abs() < 0.3 {
+                            i.at = i.target;
+                        }
+                    }
+                    let before = st.items.len();
+                    st.items.retain(|i| i.leaving.is_none_or(|(t0, _)| now - t0 < OUT));
+                    let gone = before != st.items.len();
+                    if !st.moving(now) {
+                        let h = st.needed();
+                        if h != st.height {
+                            st.height = h;
+                            heroui::resize_window(width + 2 * SHADOW, h);
+                        }
+                    }
+                    let ended = gone && st.items.is_empty() && st.ending;
+                    // Only time bars running down: just their strips.
+                    let bars: Vec<(i32, i32, i32, i32)> = st
+                        .items
+                        .iter()
+                        .filter(|i| i.clock.is_some_and(|c| c.since.is_some()))
+                        .map(|i| (w.x() + SHADOW, w.y() + st.top(i, w.h()).round() as i32 + i.layout.h - BAR - 8, width, BAR + 4))
+                        .collect();
+                    drop(st);
+                    if ended {
+                        emit(Msg::Gone);
+                    }
+                    if moving || gone {
                         heroui::widgets::repaint(&mut w);
+                    } else if let Some(mut win) = w.window() {
+                        for (x, y, bw, bh) in bars {
+                            win.set_damage_area(heroui::fltk::enums::Damage::All, x, y, bw, bh);
+                        }
                     }
                     true
                 });
             }
             let at = {
-                let view = view.clone();
+                let stack = stack.clone();
                 move |f: &Frame, (x, y): (i32, i32)| -> (Option<u32>, Option<Part>) {
-                    let (x, y) = (x - f.x() - SHADOW, y - f.y());
-                    for d in view.borrow().iter() {
-                        let l = &d.layout;
-                        if y >= d.y && y < d.y + l.h && x >= 0 && x < f.w() - 2 * SHADOW {
-                            let cy = y - d.y;
+                    let st = stack.borrow();
+                    let (x, y) = (x - f.x() - SHADOW, (y - f.y()) as f64);
+                    for i in st.items.iter().filter(|i| i.leaving.is_none()) {
+                        let (l, top) = (&i.layout, st.top(i, f.h()));
+                        if y >= top && y < top + l.h as f64 && x >= 0 && x < width {
+                            let cy = (y - top) as i32;
                             let inside = |r: (i32, i32, i32, i32)| x >= r.0 && x < r.0 + r.2 && cy >= r.1 && cy < r.1 + r.3;
                             if inside(l.close) {
-                                return (Some(d.note.id), Some(Part::Close));
+                                return (Some(i.note.id), Some(Part::Close));
                             }
                             for b in &l.buttons {
                                 if inside((b.0, b.1, b.2, b.3)) {
-                                    return (Some(d.note.id), Some(Part::Button(b.4.clone())));
+                                    return (Some(i.note.id), Some(Part::Button(b.4.clone())));
                                 }
                             }
-                            return (Some(d.note.id), Some(Part::Card));
+                            return (Some(i.note.id), Some(Part::Card));
                         }
                     }
                     (None, None)
@@ -470,18 +628,19 @@ impl App for Popups {
     }
 }
 
-fn draw_card(d: &Drawn, x: i32, y: i32, w: i32, hover: Option<Part>, now: Instant) {
+fn draw_card(d: &Item, x: i32, y: i32, w: i32, hover: Option<Part>, now: Instant) {
     let (n, l) = (&d.note, &d.layout);
     let t = heroui::theme::current();
     let mix = heroui::widgets::mix;
     let r = t.radius.clamp(10, 18) as f64;
     let (fx, fy, fw, fh) = (x as f64, y as f64, w as f64, l.h as f64);
-    // A soft shadow, then the edge, then the face.
+    // A soft shadow, then the edge, then the face: the theme's background
+    // and border, as HeroBar's popups.
     for (grow, alpha) in [(8.0, 0.04), (5.0, 0.06), (2.5, 0.09)] {
-        heroui::fx::fill_rounded(fx - grow, fy - grow + 2.0, fw + 2.0 * grow, fh + 2.0 * grow, r + grow, t.text.darker(), alpha);
+        heroui::fx::fill_rounded(fx - grow, fy - grow + 2.0, fw + 2.0 * grow, fh + 2.0 * grow, r + grow, heroui::fltk::enums::Color::from_rgb(8, 8, 12), alpha);
     }
-    heroui::fx::fill_rounded(fx, fy, fw, fh, r, mix(t.surface, t.text, 0.12), 1.0);
-    let face = if hover.is_some() { mix(t.surface, t.text, 0.035) } else { t.surface };
+    heroui::fx::fill_rounded(fx, fy, fw, fh, r, t.border, 1.0);
+    let face = if hover.is_some() { mix(t.background, t.surface_alt, 0.35) } else { t.background };
     heroui::fx::fill_rounded(fx + 1.0, fy + 1.0, fw - 2.0, fh - 2.0, r - 1.0, face, 1.0);
     if n.urgency >= 2 {
         heroui::fx::fill_rounded(fx + 1.0, fy + 14.0, 3.0, fh - 28.0, 1.5, t.accent, 1.0);
@@ -537,7 +696,7 @@ fn draw_card(d: &Drawn, x: i32, y: i32, w: i32, hover: Option<Part>, now: Instan
     if let Some(c) = d.clock {
         let inset = r;
         let (bx, by, span) = (fx + inset, fy + fh - 1.0 - BAR as f64 - 5.0, fw - 2.0 * inset);
-        heroui::fx::fill_rounded(bx, by, span, BAR as f64, BAR as f64 / 2.0, mix(t.surface, t.text, 0.08), 1.0);
+        heroui::fx::fill_rounded(bx, by, span, BAR as f64, BAR as f64 / 2.0, t.surface_alt, 1.0);
         let left = span * c.fraction(now).clamp(0.0, 1.0);
         if left > 0.5 {
             let color = if c.since.is_none() { mix(t.accent, t.text_dim, 0.45) } else { t.accent };
@@ -557,7 +716,15 @@ pub fn run() {
         Position::Bottom => heroui::Corner::Bottom,
     };
     let width = config.width.clamp(240, 800) + 2 * SHADOW;
-    let app = Popups { config, cards: vec![], waiting: VecDeque::new(), hovered: None, view: Rc::default() };
+    let side = match config.position {
+        Position::TopRight | Position::BottomRight => (1.0, 0.0),
+        Position::TopLeft | Position::BottomLeft => (-1.0, 0.0),
+        Position::Top => (0.0, -1.0),
+        Position::Bottom => (0.0, 1.0),
+    };
+    let bottom = matches!(config.position, Position::BottomLeft | Position::BottomRight | Position::Bottom);
+    let stack = Rc::new(RefCell::new(Stack { bottom, side, ..Stack::default() }));
+    let app = Popups { config, cards: vec![], waiting: VecDeque::new(), hovered: None, stack, exits: vec![] };
     let settings = Settings::new("Notifications").class("heronotify").kind(WindowKind::Notification).size(width, 1).corner(corner, 2).decorated(false).resizable(false).above(true).sticky(true).skip_taskbar(true).transparent(true);
     if let Err(e) = heroui::run(app, settings) {
         eprintln!("heronotify: {e}");
