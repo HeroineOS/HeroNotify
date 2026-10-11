@@ -7,6 +7,7 @@ mod focus;
 mod popups;
 mod service;
 mod store;
+mod takeover;
 mod text;
 
 fn usage() -> ! {
@@ -21,6 +22,8 @@ Usage:
   heronotify clear [ID]       empty the history, or take one out
   heronotify send [--app NAME] [--urgent] SUMMARY [BODY]
                               send a notification (like notify-send)
+  heronotify status            which program shows notifications
+  heronotify use               make it HeroNotify (stops another one, like XFCE's)
   heronotify dnd [on|off|toggle]
                               do-not-disturb by hand (no word: whether it's on now)
   heronotify --print-default-config
@@ -71,6 +74,29 @@ fn main() {
             let body = words.get(1).cloned().unwrap_or_default();
             send(&app, summary, &body, urgent).unwrap_or_else(|e| fail(e));
         }
+        Some("status") => {
+            use takeover::Holder;
+            let rivals = takeover::rivals();
+            let chosen = takeover::chosen();
+            match takeover::holder().unwrap_or_else(|e| fail(e)) {
+                Holder::HeroNotify => println!("heronotify"),
+                Holder::Other(name, _) => {
+                    println!("other {name}");
+                    std::process::exit(3);
+                }
+                // Nothing runs: the next notification starts HeroNotify
+                // for sure, or maybe another one.
+                Holder::Nobody if chosen || rivals.is_empty() => println!("heronotify (starts with the next notification)"),
+                Holder::Nobody => {
+                    println!("maybe {}", rivals.join(", "));
+                    std::process::exit(3);
+                }
+            }
+        }
+        Some("use") => match takeover::take_over() {
+            Ok(said) => println!("{said}"),
+            Err(e) => fail(e),
+        },
         Some("unread") => {
             let seen = store::state().seen;
             println!("{}", store::history().iter().filter(|n| n.id > seen).count());
