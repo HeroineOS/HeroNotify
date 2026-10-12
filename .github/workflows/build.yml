@@ -61,4 +61,4 @@ jobs:
         run: |
           ls -l dist
           gh release create "$GITHUB_REF_NAME" dist/*.deb --repo "$GITHUB_REPOSITORY" --draft \
-            --title "HeroPortal $GITHUB_REF_NAME" --notes "Test build. Install with: sudo apt install ./heronotify_*_<arch>.deb"
+            --title "HeroNotify $GITHUB_REF_NAME" --notes "Test build. Install with: sudo apt install ./heronotify_*_<arch>.deb"
