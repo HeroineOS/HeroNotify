@@ -266,7 +266,38 @@ fn tell(p: &mut Popups, order: &Order) {
 
 fn start_popups() -> Option<Popups> {
     let exe = std::env::current_exe().ok()?;
-    let mut child = Command::new(exe).arg("--popups").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().map_err(|e| eprintln!("heronotify: pop-ups: {e}")).ok()?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("--popups").stdin(Stdio::piped()).stdout(Stdio::piped());
+    // Started by D-Bus, the service may not know which screen to use.
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| {
+        extern "C" {
+            fn getuid() -> u32;
+        }
+        std::path::PathBuf::from(format!("/run/user/{}", unsafe { getuid() }))
+    });
+    cmd.env("XDG_RUNTIME_DIR", &runtime);
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        let mut found: Vec<String> = std::fs::read_dir(&runtime)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n.starts_with("wayland-") && !n.ends_with(".lock"))
+            .collect();
+        found.sort();
+        if let Some(w) = found.first() {
+            cmd.env("WAYLAND_DISPLAY", w);
+        }
+    }
+    let log = crate::dirs::state().join("heronotify.log");
+    let _ = std::fs::create_dir_all(crate::dirs::state());
+    if std::fs::metadata(&log).is_ok_and(|m| m.len() > 200_000) {
+        let _ = std::fs::remove_file(&log);
+    }
+    if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+        cmd.stderr(f);
+    }
+    let mut child = cmd.spawn().map_err(|e| eprintln!("heronotify: pop-ups: {e}")).ok()?;
     let stdin = child.stdin.take()?;
     let stdout = child.stdout.take()?;
     let (tx, events) = mpsc::channel();
